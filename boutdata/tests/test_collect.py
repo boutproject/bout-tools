@@ -96,35 +96,63 @@ def check_collected_data(
 
     for varname in expected:
         actual = collect(varname, path=path, **collect_kwargs)
-        npt.assert_array_equal(expected[varname], actual)
-        actual_keys = list(actual.attributes.keys())
-        if varname in expected_attributes:
-            for a in expected_attributes[varname]:
-                assert actual.attributes[a] == expected_attributes[varname][a]
-                actual_keys.remove(a)
+        check_variable(
+            varname,
+            actual,
+            expected[varname],
+            expected_attributes.get(varname, None),
+            fieldperp_global_yind,
+        )
 
-        if "fieldperp" in varname:
-            assert actual.attributes["yindex_global"] == fieldperp_global_yind
-            actual_keys.remove("yindex_global")
 
-        assert actual_keys == ["bout_type"]
+def check_variable(
+    varname, actual, expected_data, expected_attributes, fieldperp_global_yind
+):
+    """
+    Check a single variable
 
-        if "field3d_t" in varname:
-            assert actual.attributes["bout_type"] == "Field3D_t"
-        elif "field3d" in varname:
-            assert actual.attributes["bout_type"] == "Field3D"
-        elif "field2d_t" in varname:
-            assert actual.attributes["bout_type"] == "Field2D_t"
-        elif "field2d" in varname:
-            assert actual.attributes["bout_type"] == "Field2D"
-        elif "fieldperp_t" in varname:
-            assert actual.attributes["bout_type"] == "FieldPerp_t"
-        elif "fieldperp" in varname:
-            assert actual.attributes["bout_type"] == "FieldPerp"
-        elif "_t" in varname or varname == "t_array":
-            assert actual.attributes["bout_type"] == "scalar_t"
-        else:
-            assert actual.attributes["bout_type"] == "scalar"
+    Parameters
+    ----------
+    varname : str
+        Name of the variable
+    actual : BoutArray
+        The collected variable
+    expected_data : np.Array
+        Expected data for the variable
+    expected_attributes : dict or None
+        Expected attributes for the variable
+    fieldperp_global_yind : int
+        Global y-index where FieldPerps have been created
+    """
+    npt.assert_array_equal(expected_data, actual)
+    actual_keys = list(actual.attributes.keys())
+    if expected_attributes is not None:
+        for a in expected_attributes:
+            assert actual.attributes[a] == expected_attributes[a]
+            actual_keys.remove(a)
+
+    if "fieldperp" in varname:
+        assert actual.attributes["yindex_global"] == fieldperp_global_yind
+        actual_keys.remove("yindex_global")
+
+    assert actual_keys == ["bout_type"]
+
+    if "field3d_t" in varname:
+        assert actual.attributes["bout_type"] == "Field3D_t"
+    elif "field3d" in varname:
+        assert actual.attributes["bout_type"] == "Field3D"
+    elif "field2d_t" in varname:
+        assert actual.attributes["bout_type"] == "Field2D_t"
+    elif "field2d" in varname:
+        assert actual.attributes["bout_type"] == "Field2D"
+    elif "fieldperp_t" in varname:
+        assert actual.attributes["bout_type"] == "FieldPerp_t"
+    elif "fieldperp" in varname:
+        assert actual.attributes["bout_type"] == "FieldPerp"
+    elif "_t" in varname or varname == "t_array":
+        assert actual.attributes["bout_type"] == "scalar_t"
+    else:
+        assert actual.attributes["bout_type"] == "scalar"
 
 
 class TestCollect:
@@ -175,6 +203,212 @@ class TestCollect:
             collect_kwargs=collect_kwargs,
             squash_kwargs=squash_kwargs,
         )
+
+    @pytest.mark.parametrize(
+        "time_split",
+        [
+            (None, None),
+            (1, None),
+            (2, None),
+            (2, 3),
+            (3, None),
+            (4, None),
+            (5, None),
+            (6, None),
+            (7, None),
+        ],
+    )
+    def test_core_min_files_existing_squash_file_raises(self, tmp_path, time_split):
+        """
+        Check output from a core-only case using the minimum number of processes
+        """
+        time_split_size, time_split_first_label = time_split
+
+        squash_kwargs = {}
+        if time_split_size is not None:
+            squash_kwargs["time_split_size"] = time_split_size
+        if time_split_first_label is not None:
+            squash_kwargs["time_split_first_label"] = time_split_first_label
+
+        grid_info = make_grid_info()
+
+        fieldperp_global_yind = 3
+
+        rng = np.random.default_rng(100)
+
+        # core
+        # core includes "ylower" and "yupper" even though there is no actual y-boundary
+        # because collect/squashoutput collect these points
+        dump_params = [
+            (0, ["xinner", "xouter", "ylower", "yupper"], fieldperp_global_yind),
+        ]
+        for i, boundaries, fieldperp_yind in dump_params:
+            create_dump_file(
+                tmpdir=tmp_path,
+                rng=rng,
+                grid_info=grid_info,
+                i=i,
+                boundaries=boundaries,
+                fieldperp_global_yind=fieldperp_yind,
+            )
+
+        if time_split_size is None:
+            filenames = ["boutdata.nc"]
+        else:
+            first = 0 if time_split_first_label is None else time_split_first_label
+            # Assumes 'nt' is always 6, as set by make_grid_info() and
+            # create_dump_file()
+            n_output = (6 + time_split_size - 1) // time_split_size
+            filenames = [f"boutdata{i}.nc" for i in range(first, first + n_output)]
+
+        for f in filenames:
+            # Create file named f
+            existing_file = tmp_path.joinpath(f)
+            existing_file.touch()
+
+            with pytest.raises(
+                ValueError,
+                match=r" will not overwrite. Also, for some filenames collect may try "
+                r"to read from this file, which is presumably not desired behaviour.",
+            ):
+                squashoutput(tmp_path, outputname="boutdata.nc", **squash_kwargs)
+
+            # Remove 'existing_file' so we can check the next one
+            existing_file.unlink()
+
+    @pytest.mark.parametrize(
+        "time_split",
+        [
+            (1, None),
+            (2, None),
+            (2, 3),
+            (3, None),
+            (4, None),
+            (5, None),
+            (6, None),
+            (7, None),
+        ],
+    )
+    @pytest.mark.parametrize("parallel", [False, 2])
+    def test_core_min_files_time_split(self, tmp_path, time_split, parallel):
+        """
+        Check output from a core-only case using the minimum number of processes
+        """
+        collect_kwargs = {"xguards": True, "yguards": "include_upper"}
+        squash_kwargs = {"time_split_size": time_split[0], "parallel": parallel}
+        if time_split[1] is not None:
+            squash_kwargs["time_split_first_label"] = time_split[1]
+
+        grid_info = make_grid_info()
+
+        fieldperp_global_yind = 3
+        fieldperp_yproc_ind = 0
+
+        rng = np.random.default_rng(100)
+
+        # core
+        # core includes "ylower" and "yupper" even though there is no actual y-boundary
+        # because collect/squashoutput collect these points
+        dump_params = [
+            (0, ["xinner", "xouter", "ylower", "yupper"], fieldperp_global_yind),
+        ]
+        dumps = []
+        for i, boundaries, fieldperp_yind in dump_params:
+            dumps.append(
+                create_dump_file(
+                    tmpdir=tmp_path,
+                    rng=rng,
+                    grid_info=grid_info,
+                    i=i,
+                    boundaries=boundaries,
+                    fieldperp_global_yind=fieldperp_yind,
+                )
+            )
+
+        expected = concatenate_data(
+            dumps, nxpe=grid_info["NXPE"], fieldperp_yproc_ind=fieldperp_yproc_ind
+        )
+
+        # Copy of check_collected_data code, modified to test series of output
+        # files created when setting time_split_size
+        ######################################################################
+
+        # Always squash
+        squashoutput(
+            tmp_path, outputname="boutdata.nc", **collect_kwargs, **squash_kwargs
+        )
+        collect_prefix = "boutdata"
+        # Delete dump files to be sure we do not read from them
+        dump_names = glob(str(tmp_path.joinpath("BOUT.dmp.*.nc")))
+        for x in dump_names:
+            Path(x).unlink()
+
+        # Assumes 'nt' is always 6, as set by make_grid_info() and create_dump_file()
+        n_output = (6 + time_split[0] - 1) // time_split[0]
+        if time_split[1] is None:
+            start_ind = 0
+        else:
+            start_ind = time_split[1]
+
+        for i in range(n_output):
+            for varname in expected:
+                actual = collect(
+                    varname,
+                    prefix=collect_prefix + str(start_ind + i),
+                    path=tmp_path,
+                    **collect_kwargs,
+                )
+
+                if "_t" in actual.attributes["bout_type"]:
+                    expected_data = expected[varname][
+                        i * time_split[0] : (i + 1) * time_split[0]
+                    ]
+                else:
+                    expected_data = expected[varname]
+
+                check_variable(
+                    varname,
+                    actual,
+                    expected_data,
+                    expected_attributes.get(varname, None),
+                    fieldperp_global_yind,
+                )
+
+    def test_core_min_files_append_time_split_raises(self, tmp_path):
+        """
+        Check output from a core-only case using the minimum number of processes
+        """
+        collect_kwargs = {"xguards": True, "yguards": "include_upper"}
+        squash_kwargs = {"time_split_size": 2, "append": True}
+
+        grid_info = make_grid_info()
+
+        fieldperp_global_yind = 3
+
+        rng = np.random.default_rng(100)
+
+        # core
+        # core includes "ylower" and "yupper" even though there is no actual y-boundary
+        # because collect/squashoutput collect these points
+        dump_params = [
+            (0, ["xinner", "xouter", "ylower", "yupper"], fieldperp_global_yind),
+        ]
+        for i, boundaries, fieldperp_yind in dump_params:
+            create_dump_file(
+                tmpdir=tmp_path,
+                rng=rng,
+                grid_info=grid_info,
+                i=i,
+                boundaries=boundaries,
+                fieldperp_global_yind=fieldperp_yind,
+            )
+
+        with pytest.raises(
+            ValueError, match="'time_split_size' is not compatible with append=True"
+        ):
+            squashoutput(
+                tmp_path, outputname="boutdata.nc", **collect_kwargs, **squash_kwargs
+            )
 
     @pytest.mark.parametrize("squash_params", squash_params_list)
     @pytest.mark.parametrize("collect_kwargs", collect_kwargs_list)
