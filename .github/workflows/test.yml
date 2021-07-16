@@ -10,6 +10,10 @@ on:
     # https://crontab.guru/#0_0_1_*_*
     - cron: "0 0 1 * *"
 
+concurrency:
+  group: ${{ github.workflow}}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # As we are running on different environments, we are splitting the jobs
   # https://docs.github.com/en/free-pro-team@latest/actions/reference/workflow-syntax-for-github-actions#jobs
